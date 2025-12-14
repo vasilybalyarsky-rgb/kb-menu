@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>UX-тест навигации ассортимента</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+<style>
+body{margin:0;font-family:Arial;background:#f5f5f5}
+header{background:#2f2f2f;color:#fff;padding:14px 16px;font-size:18px}
+.controls{background:#fff;padding:10px 16px;border-bottom:1px solid #ddd;display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.container{padding:16px;display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+.item{background:#fff;border-radius:10px;padding:16px;text-align:center;box-shadow:0 2px 4px rgba(0,0,0,.08)}
+.folder{cursor:pointer;background:#f0f8ff;font-weight:bold}
+.product{background:#fffbe6;cursor:pointer}
+.path{padding:10px 16px;background:#fafafa;border-bottom:1px solid #ddd}
+.path span{color:#0077cc;cursor:pointer}
+button,input{padding:6px 10px}
+.test-box{padding:12px 16px;background:#e8f4ff;border-bottom:1px solid #cce}
+.alert-wrong{background:#ffe8e8;color:#a00;padding:10px 16px}
+</style>
+</head>
+
+<body>
+
+<header>UX-тест навигации ассортимента</header>
+
+<div class="controls">
+  <input type="text" id="employeeName" placeholder="Имя сотрудника">
+  <input type="file" id="fileInput" accept=".xlsx,.xls">
+  <button onclick="goBack()">Назад</button>
+  <button onclick="goHome()">В главное меню</button>
+  <button onclick="startSmartTest()">Начать тест</button>
+  <button onclick="exportResults()">📤 Экспорт</button>
+</div>
+
+<div class="test-box" id="testBox" style="display:none"></div>
+<div class="alert-wrong" id="wrongBox" style="display:none">❌ Неправильно</div>
+<div class="path" id="path">📁</div>
+<div class="container" id="container"></div>
+
+<script>
+/* ========= ХРАНИЛИЩЕ ========= */
+const STORAGE_KEY = 'ux_test_history';
+let testHistory = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+
+/* ========= ДАННЫЕ ========= */
+let tree = {};
+let currentPath = [];
+let employee = '';
+
+let testItems = [];
+let testIndex = 0;
+let testClicks = 0;
+let activeTarget = null;
+
+/* ========= ЗАГРУЗКА EXCEL ========= */
+document.getElementById('fileInput').addEventListener('change', loadExcel);
+
+function loadExcel(e){
+  const file=e.target.files[0];
+  if(!file) return;
+
+  const reader=new FileReader();
+  reader.onload=ev=>{
+    const wb=XLSX.read(ev.target.result,{type:'binary'});
+    const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1});
+
+    tree={};
+    const stack=[];
+
+    rows.slice(1).forEach(r=>{
+      const level=Number(r[0]);
+      const type=r[1];
+      const name=r[2];
+      if(!level||!type||!name) return;
+
+      const node={name,type,children:{}};
+      stack[level-1]=node;
+      stack.length=level;
+
+      if(level===1) tree[name]=node;
+      else if(stack[level-2]?.type==='folder'){
+        stack[level-2].children[name]=node;
+      }
+    });
+
+    currentPath=[];
+    render();
+  };
+  reader.readAsBinaryString(file);
+}
+
+/* ========= НАВИГАЦИЯ ========= */
+function getNode(){
+  return currentPath.reduce((n,k)=>n.children[k],{children:tree});
+}
+
+function render(){
+  const c=document.getElementById('container');
+  const p=document.getElementById('path');
+  c.innerHTML='';
+  p.innerHTML='📁 '+currentPath.map((x,i)=>`<span onclick="goTo(${i})">${x}</span>`).join(' / ');
+
+  Object.values(getNode().children).forEach(ch=>{
+    const d=document.createElement('div');
+    d.className='item '+(ch.type==='folder'?'folder':'product');
+    d.textContent=ch.type==='folder'?'📁 '+ch.name:ch.name;
+
+    if(ch.type==='folder'){
+      d.onclick=()=>{
+        currentPath.push(ch.name);
+        if(activeTarget) testClicks++;
+        render();
+      };
+    } else {
+      d.onclick=()=>onProductClick(ch.name);
+    }
+    c.appendChild(d);
+  });
+}
+
+function goTo(i){currentPath=currentPath.slice(0,i+1);if(activeTarget) testClicks++;render();}
+function goBack(){if(currentPath.length){currentPath.pop();if(activeTarget) testClicks++;render();}}
+function goHome(){currentPath=[];if(activeTarget) testClicks++;render();}
+
+/* ========= ОТБОР ТОВАРОВ (ФИНАЛЬНЫЕ ПРАВИЛА) ========= */
+function collectItems(node,path=[],result=[]){
+  const DAYS=['Понедельник','Вторник','Среда','Четверг','Пятница','Суббота','Воскресенье'];
+
+  Object.values(node).forEach(n=>{
+    const newPath=[...path,n.name];
+    let allow=true;
+
+    // Завтраки/Ланчи → ТОЛЬКО Понедельник
+    if(newPath[0]==='Завтраки/Ланчи'){
+      const days=newPath.filter(p=>DAYS.includes(p));
+      if(!days.includes('Понедельник')) allow=false;
+      if(days.some(d=>d!=='Понедельник')) allow=false;
+    }
+
+    // Доп/Поз → ТОЛЬКО КОРЕНЬ
+    if(newPath[0]==='Доп/Поз' && newPath.length!==2){
+      allow=false;
+    }
+
+    if(n.type==='item' && allow){
+      result.push({
+        name:n.name,
+        steps:newPath.length-1,
+        section:newPath[0]
+      });
+    }
+
+    if(n.children) collectItems(n.children,newPath,result);
+  });
+  return result;
+}
+
+/* ========= ТЕСТ ========= */
+function startSmartTest(){
+  employee=document.getElementById('employeeName').value.trim();
+  if(!employee){alert('Введите имя сотрудника');return;}
+
+  const allItems=collectItems(tree);
+  if(allItems.length<5){alert('Недостаточно позиций');return;}
+
+  testItems=allItems.sort(()=>0.5-Math.random()).slice(0,5);
+  testIndex=0;
+  nextTestItem();
+}
+
+function nextTestItem(){
+  if(testIndex>=testItems.length){
+    alert('Тест завершён');
+    activeTarget=null;
+    return;
+  }
+
+  activeTarget=testItems[testIndex];
+  testClicks=0;
+  currentPath=[];
+  document.getElementById('wrongBox').style.display='none';
+  render();
+
+  document.getElementById('testBox').style.display='block';
+  document.getElementById('testBox').innerHTML=
+    `<b>${employee}</b><br>Найдите товар: <b>${activeTarget.name}</b><br>Эталон: ${activeTarget.steps}`;
+}
+
+function onProductClick(name){
+  if(!activeTarget) return;
+
+  const success=name===activeTarget.name;
+  if(!success) document.getElementById('wrongBox').style.display='block';
+
+  const record={
+    date:new Date().toLocaleString(),
+    employee,
+    product:activeTarget.name,
+    section:activeTarget.section,
+    expected:activeTarget.steps,
+    actual:testClicks,
+    delta:testClicks-activeTarget.steps,
+    kpiOk:success && testClicks<=activeTarget.steps+1
+  };
+
+  testHistory.push(record);
+  localStorage.setItem(STORAGE_KEY,JSON.stringify(testHistory));
+
+  testIndex++;
+  setTimeout(nextTestItem,700);
+}
+
+/* ========= ЭКСПОРТ ========= */
+function exportResults(){
+  if(!testHistory.length){alert('История пуста');return;}
+
+  const sheet1=XLSX.utils.json_to_sheet(testHistory.map((r,i)=>({
+    '#':i+1,
+    Дата:r.date,
+    Сотрудник:r.employee,
+    Товар:r.product,
+    Раздел:r.section,
+    Эталон:r.expected,
+    Факт:r.actual,
+    Отклонение:r.delta,
+    'KPI OK':r.kpiOk?'Да':'Нет'
+  })));
+
+  const stats={};
+  testHistory.forEach(r=>{
+    const k=r.section;
+    if(!stats[k]) stats[k]={t:0,o:0};
+    stats[k].t++; if(r.kpiOk) stats[k].o++;
+  });
+
+  const sheet2=XLSX.utils.json_to_sheet(
+    Object.entries(stats).map(([k,v])=>({
+      Раздел:k,
+      Тестов:v.t,
+      'KPI OK':v.o,
+      '% KPI OK':Math.round(v.o/v.t*100)
+    })).sort((a,b)=>b['% KPI OK']-a['% KPI OK'])
+  );
+
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,sheet1,'История');
+  XLSX.utils.book_append_sheet(wb,sheet2,'Рейтинг');
+  XLSX.writeFile(wb,'ux_test_history.xlsx');
+}
+</script>
+
+</body>
+</html>
